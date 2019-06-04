@@ -10,3 +10,7 @@ UnityPackageManager/
 *.sdf
 *.sln
 *.user
+Assets/GitIgnore/
+Assets/GitIgnore.meta
+Logs/
+*.unitypackage

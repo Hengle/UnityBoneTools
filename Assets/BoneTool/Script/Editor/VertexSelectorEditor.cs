@@ -1,7 +1,5 @@
-﻿using System;
-using System.Collections;
-using System.Collections.Generic;
-using BoneTool.Script.Runtime;
+﻿using BoneTool.Script.Runtime;
+using Chaos;
 using UnityEditor;
 using UnityEngine;
 
@@ -15,6 +13,10 @@ public class VertexSelectorEditor : Editor
     private static Vector3 _pos;
     private static int _idx;
     private static Vector3 _vtx;
+    private static BoneWeight _bws;
+#if DEBUG_VERTEX_SELECTOR
+    private static Shader _shader;
+#endif
 
     [MenuItem("Tools/VertexSelector", true)]
     static bool ValidateSceneViewCustomSceneMode()
@@ -39,75 +41,72 @@ public class VertexSelectorEditor : Editor
             }
             _selectedTransform = trans;
             _idx = -1;
-            VertexSelector com = _selectedTransform.GetComponent<VertexSelector>();
-            if (null == com)
-            {
-                com = _selectedTransform.gameObject.AddComponent<VertexSelector>();
-            }
+            VertexSelector com = _selectedTransform.GetOrAddComponent<VertexSelector>();
             EditorApplication.update += Update;
+#if DEBUG_VERTEX_SELECTOR
+            SceneView view = SceneView.lastActiveSceneView;
+            if (null != view)
+            {
+                _shader = Shader.Find("Hidden/VertexSelector");
+                view.SetSceneViewShaderReplace(_shader, null);
+            }
+#if UNITY_2018_1_OR_NEWER
+           EditorApplication.quitting += SceneViewClearSceneView;
+#endif
+#endif
         }
         else
         {
-            VertexSelector com = _selectedTransform.GetComponent<VertexSelector>();
-            if (null != com)
-            {
-                VertexSelector.DestroyImmediate(com);
-            }
+            _selectedTransform.DestroyComponentImmediate<VertexSelector>();
             EditorApplication.update -= Update;
+
+#if DEBUG_VERTEX_SELECTOR
+            SceneViewClearSceneView();
+#endif
         }
     }
+
+#if DEBUG_VERTEX_SELECTOR
+    static void SceneViewClearSceneView()
+    {
+        GC.Collect();
+        Resources.UnloadUnusedAssets();
+        SceneView view = SceneView.lastActiveSceneView;
+        if (null != view)
+        {
+            view.SetSceneViewShaderReplace(null, null);
+            view.Repaint();
+        }
+        _shader = null;
+    }
+#endif
 
     private static void Update()
     {
         Selection.activeTransform = _selectedTransform;
     }
 
-    private static Matrix4x4 BoneToWorld(Transform[] bones, Matrix4x4[] bindPoses, BoneWeight bw)
+    private static int GetNearestPoint(Vector3 v0, Vector3 v1, Vector3 v2, Vector3 ip)
     {
 
-        Matrix4x4 m0 = bones[bw.boneIndex0].localToWorldMatrix * bindPoses[bw.boneIndex0] *
-                       Matrix4x4.Scale(Vector3.one*bw.weight0);
-        Matrix4x4 m1 = bones[bw.boneIndex1].localToWorldMatrix * bindPoses[bw.boneIndex1] *
-                       Matrix4x4.Scale(Vector3.one*bw.weight1);
-        Matrix4x4 m2 = bones[bw.boneIndex2].localToWorldMatrix * bindPoses[bw.boneIndex2] *
-                       Matrix4x4.Scale(Vector3.one*bw.weight2);
-        Matrix4x4 m3 = bones[bw.boneIndex3].localToWorldMatrix * bindPoses[bw.boneIndex3] * 
-                       Matrix4x4.Scale(Vector3.one * bw.weight3);
-        Matrix4x4 ret = Matrix4x4.zero;
-        for (int i = 0; i < 16; i++)
+        Vector3 p0 = ip - v0;
+        Vector3 p1 = ip - v1;
+        Vector3 p2 = ip - v2;
+        float sd0 = p0.sqrMagnitude;
+        float sd1 = p1.sqrMagnitude;
+        float sd2 = p2.sqrMagnitude;
+        if (sd0 < sd1 && sd0 < sd2)
         {
-            ret[i] = m0[i] + m1[i] + m2[i] + m3[i];
+            return 0;
         }
-        return ret;
-    }
-
-    float CheckIntersect(Vector3 v0, Vector3 v1, Vector3 v2, Ray ray, float maxDist, out Vector3 ip)
-    {
-
-        Vector3 normal = Vector3.Cross(v0 - v1, v1 - v2).normalized;
-        float x = Vector3.Dot(normal, v1 - ray.origin) / Vector3.Dot(normal, ray.direction);
-        ip = ray.origin + x * ray.direction;
-        if (x > 0 && x < maxDist)
+        else if (sd1 < sd0 && sd1 < sd2)
         {
-            Vector3 p0 = (ip - v0).normalized;
-            Vector3 p1 = (ip - v1).normalized;
-            Vector3 p2 = (ip - v2).normalized;
-            if (Mathf.Approximately(-1, Vector3.Dot(p0, p1)) ||
-                Mathf.Approximately(-1, Vector3.Dot(p1, p2)) ||
-                Mathf.Approximately(-1, Vector3.Dot(p2, p0)))
-            {
-                return x;
-            }
-            Vector3 np01 = Vector3.Cross(p0, p1).normalized;
-            Vector3 np12 = Vector3.Cross(p1, p2).normalized;
-            Vector3 np20 = Vector3.Cross(p2, p0).normalized;
-            if (Mathf.Approximately(1, Vector3.Dot(np01, np12)) &&
-                Mathf.Approximately(1, Vector3.Dot(np12, np20)))
-            {
-                return x;
-            }
+            return 1;
         }
-        return float.MaxValue;
+        else
+        {
+            return 2;
+        }
     }
 
     private void OnSceneGUI()
@@ -123,6 +122,7 @@ public class VertexSelectorEditor : Editor
             Handles.matrix = Matrix4x4.identity;
             Handles.CubeHandleCap(0, _pos, Quaternion.identity, 0.01f, EventType.Repaint);
             Handles.Label(_pos + new Vector3(0, 0.02f, 0), string.Format("Vertex ID {0}, World Position {1} Model Position {2}", _idx, _pos.ToString("F"), _vtx.ToString("F")));
+            Handles.Label(_pos + new Vector3(0, 0.01f, 0), string.Format("BoneWeights ({0}:{1}),({2}:{3}),({4}:{5}),({6}:{7})", _bws.boneIndex0, _bws.weight0, _bws.boneIndex1, _bws.weight1, _bws.boneIndex2, _bws.weight2, _bws.boneIndex3, _bws.weight3));
         }
         Selection.activeTransform = _selectedTransform;
         if (Event.current != null && Event.current.type == EventType.MouseDown && Tools.current == Tool.Move)
@@ -143,9 +143,6 @@ public class VertexSelectorEditor : Editor
                     {
                         Mesh mesh = smr.sharedMesh;
                         Vector3[] vertices = mesh.vertices;
-                        BoneWeight[] boneWeights = mesh.boneWeights;
-                        Matrix4x4[] bindPoses = mesh.bindposes;
-                        Transform[] bones = smr.bones;
                         for (int s = 0, smax = mesh.subMeshCount; s < smax; s++)
                         {
                             int[] triangles = mesh.GetTriangles(s);
@@ -154,42 +151,29 @@ public class VertexSelectorEditor : Editor
                                 int i0 = triangles[t * 3];
                                 int i1 = triangles[t * 3 + 1];
                                 int i2 = triangles[t * 3 + 2];
-                                BoneWeight bw0 = boneWeights[i0];
-                                BoneWeight bw1 = boneWeights[i1];
-                                BoneWeight bw2 = boneWeights[i2];
-                                Matrix4x4 m0 = BoneToWorld(bones, bindPoses, bw0);
-                                Matrix4x4 m1 = BoneToWorld(bones, bindPoses, bw1);
-                                Matrix4x4 m2 = BoneToWorld(bones, bindPoses, bw2);
-                                Vector3 v0 = m0.MultiplyPoint3x4(vertices[i0]);
-                                Vector3 v1 = m1.MultiplyPoint3x4(vertices[i1]);
-                                Vector3 v2 = m2.MultiplyPoint3x4(vertices[i2]);
+                                Vector3 v0 = smr.GetSkinnedVertexWS(i0);
+                                Vector3 v1 = smr.GetSkinnedVertexWS(i1);
+                                Vector3 v2 = smr.GetSkinnedVertexWS(i2);
                                 Vector3 ip;
-                                float x = CheckIntersect(v0, v1, v2, ray, minIntersectDistance, out ip);
-                                if (x > minIntersectDistance)
+                                if (!ray.CheckIntersect(v0, v1, v2, out ip, ref minIntersectDistance))
                                 {
                                     continue;
                                 }
-                                minIntersectDistance = x;
-                                Vector3 p0 = ip - v0;
-                                Vector3 p1 = ip - v1;
-                                Vector3 p2 = ip - v2;
-                                float sd0 = p0.sqrMagnitude;
-                                float sd1 = p1.sqrMagnitude;
-                                float sd2 = p2.sqrMagnitude;
-                                if (sd0 < sd1 && sd0 < sd2)
+                                switch (GetNearestPoint(v0, v1, v2, ip))
                                 {
-                                    minIntersectVertexIndex = i0;
-                                    minIntersectPosition = v0;
-                                }
-                                else if (sd1 < sd0 && sd1 < sd2)
-                                {
-                                    minIntersectVertexIndex = i1;
-                                    minIntersectPosition = v1;
-                                }
-                                else
-                                {
-                                    minIntersectVertexIndex = i2;
-                                    minIntersectPosition = v2;
+                                    case 0:
+                                        minIntersectVertexIndex = i0;
+                                        minIntersectPosition = v0;
+                                        break;
+                                    case 1:
+                                        minIntersectVertexIndex = i1;
+                                        minIntersectPosition = v1;
+                                        break;
+                                    case 2:
+                                    default:
+                                        minIntersectVertexIndex = i2;
+                                        minIntersectPosition = v2;
+                                        break;
                                 }
                             }
                         }
@@ -198,6 +182,7 @@ public class VertexSelectorEditor : Editor
                             _pos = minIntersectPosition;
                             _idx = minIntersectVertexIndex;
                             _vtx = vertices[minIntersectVertexIndex];
+                            _bws = mesh.boneWeights[minIntersectVertexIndex];
                         }
                     }
                 }
@@ -228,32 +213,25 @@ public class VertexSelectorEditor : Editor
                                 Vector3 v1 = vertices[i1];
                                 Vector3 v2 = vertices[i2];
                                 Vector3 ip;
-                                float x = CheckIntersect(v0, v1, v2, localRay, minIntersectDistance, out ip);
-                                if (x > minIntersectDistance)
+                                if (!localRay.CheckIntersect(v0, v1, v2, out ip, ref minIntersectDistance))
                                 {
                                     continue;
                                 }
-                                minIntersectDistance = x;
-                                Vector3 p0 = ip - v0;
-                                Vector3 p1 = ip - v1;
-                                Vector3 p2 = ip - v2;
-                                float sd0 = p0.sqrMagnitude;
-                                float sd1 = p1.sqrMagnitude;
-                                float sd2 = p2.sqrMagnitude;
-                                if (sd0 < sd1 && sd0 < sd2)
+                                switch (GetNearestPoint(v0, v1, v2, ip))
                                 {
-                                    minIntersectVertexIndex = i0;
-                                    minIntersectPosition = v0;
-                                }
-                                else if (sd1 < sd0 && sd1 < sd2)
-                                {
-                                    minIntersectVertexIndex = i1;
-                                    minIntersectPosition = v1;
-                                }
-                                else
-                                {
-                                    minIntersectVertexIndex = i2;
-                                    minIntersectPosition = v2;
+                                    case 0:
+                                        minIntersectVertexIndex = i0;
+                                        minIntersectPosition = v0;
+                                        break;
+                                    case 1:
+                                        minIntersectVertexIndex = i1;
+                                        minIntersectPosition = v1;
+                                        break;
+                                    case 2:
+                                    default:
+                                        minIntersectVertexIndex = i2;
+                                        minIntersectPosition = v2;
+                                        break;
                                 }
                             }
                         }
@@ -267,5 +245,13 @@ public class VertexSelectorEditor : Editor
                 }
             }
         }
+
+#if DEBUG_VERTEX_SELECTOR
+        if (_idx >= 0)
+        {
+            Shader.SetGlobalColor("SelectedColor", Color.red);
+            Shader.SetGlobalInt("SelectedVid", _idx);
+        }
+#endif
     }
 }
